@@ -5,6 +5,7 @@ from time import time, mktime
 
 from django.core.exceptions import MultipleObjectsReturned, ValidationError
 from django.db import models
+from django.conf import settings
 from django.db.models import signals
 from django.utils.translation import ugettext_lazy as _
 
@@ -19,7 +20,21 @@ from .utils import now
 
 TASK_STATE_CHOICES = zip(states.ALL_STATES, states.ALL_STATES)
 
+# Temporary fix for the issue: 
+# https://github.com/celery/django-celery/issues/139 
+def fix_timestamp(cls):
+    if not getattr(settings, "USE_TZ", False):
+        cls.original_save = cls.save
+        def save(self, *args, **kwargs):
+            for field in self._meta.fields:
+                if field.get_internal_type() == 'DateTimeField':
+                    if self.__dict__[field.name] is not None:
+                        self.__dict__[field.name] = datetime.utcfromtimestamp(mktime(self.__dict__[field.name].timetuple()))
+            self.original_save(*args,**kwargs)
+        cls.save = save
+    return cls
 
+@fix_timestamp
 class TaskMeta(models.Model):
     """Task result/status."""
     task_id = models.CharField(_('task id'), max_length=255, unique=True)
@@ -51,6 +66,7 @@ class TaskMeta(models.Model):
         return '<Task: {0.task_id} state={0.status}>'.format(self)
 
 
+@fix_timestamp
 class TaskSetMeta(models.Model):
     """TaskSet result"""
     taskset_id = models.CharField(_('group id'), max_length=255, unique=True)
@@ -164,6 +180,7 @@ class CrontabSchedule(models.Model):
             return cls(**spec)
 
 
+@fix_timestamp
 class PeriodicTasks(models.Model):
     ident = models.SmallIntegerField(default=1, primary_key=True, unique=True)
     last_update = models.DateTimeField(null=False)
@@ -184,6 +201,7 @@ class PeriodicTasks(models.Model):
             pass
 
 
+@fix_timestamp
 class PeriodicTask(models.Model):
     name = models.CharField(_('name'), max_length=200, unique=True,
         help_text=_('Useful description'),
@@ -261,6 +279,7 @@ signals.pre_delete.connect(PeriodicTasks.changed, sender=PeriodicTask)
 signals.pre_save.connect(PeriodicTasks.changed, sender=PeriodicTask)
 
 
+@fix_timestamp
 class WorkerState(models.Model):
     hostname = models.CharField(_('hostname'), max_length=255, unique=True)
     last_heartbeat = models.DateTimeField(_('last heartbeat'),
@@ -292,6 +311,7 @@ class WorkerState(models.Model):
         return mktime(self.last_heartbeat.timetuple())
 
 
+@fix_timestamp
 class TaskState(models.Model):
     state = models.CharField(_('state'),
         max_length=64, choices=TASK_STATE_CHOICES, db_index=True,
@@ -324,11 +344,6 @@ class TaskState(models.Model):
         verbose_name_plural = _('tasks')
         get_latest_by = 'tstamp'
         ordering = ['-tstamp']
-
-    def save(self, *args, **kwargs):
-        if self.eta is not None:
-            self.eta = datetime.utcfromtimestamp(mktime(self.eta.timetuple()))
-        super(TaskState, self).save(*args, **kwargs)
 
     def __unicode__(self):
         name = self.name or 'UNKNOWN'
